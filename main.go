@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	AppVersion = "0.0.2"
+	AppVersion = "0.0.3"
 )
 
 var (
@@ -49,8 +49,26 @@ func main() {
 	}
 
 	if *argCluster == "" {
-		input := &ecs.ListClustersInput{}
-		result, err := svc.ListClusters(input)
+		res0, err := svc.ListClusters(&ecs.ListClustersInput{})
+		if err != nil {
+			if aerr, ok := err.(awserr.Error); ok {
+				fmt.Println(aerr.Error())
+			} else {
+				fmt.Println(err.Error())
+			}
+			return
+		}
+		var clsNames []*string
+		for _, r := range res0.ClusterArns {
+			splitedArn := strings.Split(*r, "/")
+			clusterName := splitedArn[len(splitedArn)-1]
+			clsNames = append(clsNames, aws.String(clusterName))
+		}
+
+		inp1 := &ecs.DescribeClustersInput{
+			Clusters: clsNames,
+		}
+		res1, err := svc.DescribeClusters(inp1)
 		if err != nil {
 			if aerr, ok := err.(awserr.Error); ok {
 				fmt.Println(aerr.Error())
@@ -60,16 +78,24 @@ func main() {
 			return
 		}
 		var clsDatas [][]string
-		for _, r := range result.ClusterArns {
-			// fmt.Println(*r)
-			splitedArn := strings.Split(*r, "/")
-			clusterName := splitedArn[len(splitedArn)-1]
+		for _, r := range res1.Clusters {
+			launchType := "EC2"
+			if *r.RegisteredContainerInstancesCount == 0 && *r.RunningTasksCount > 0 {
+				launchType = "FARGATE"
+			} else if *r.RegisteredContainerInstancesCount == 0 && *r.RunningTasksCount == 0 {
+				launchType = "---"
+			}
 			clsData := []string{
-				clusterName,
+				*r.ClusterName,
+				launchType,
+				strconv.FormatInt(*r.RegisteredContainerInstancesCount, 10),
+				strconv.FormatInt(*r.RunningTasksCount, 10),
+				strconv.FormatInt(*r.PendingTasksCount, 10),
+				*r.Status,
 			}
 			clsDatas = append(clsDatas, clsData)
 		}
-		clsHeader := []string{"Cluster Name"}
+		clsHeader := []string{"Cluster Name", "Launch Type", "Container Instances", "Running Tasks", "Pending Tasks", "Status"}
 		printTable(clsDatas, clsHeader)
 		os.Exit(0)
 	}
