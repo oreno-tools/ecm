@@ -3,23 +3,12 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	_ "github.com/aws/aws-sdk-go/aws/credentials"
-	_ "github.com/aws/aws-sdk-go/aws/credentials/stscreds"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/ecs"
-	_ "github.com/gosuri/uilive"
-	_ "github.com/kyokomi/emoji"
 	"github.com/olekukonko/tablewriter"
 	"os"
-	"strconv"
-	"strings"
-	_ "time"
 )
 
 const (
-	AppVersion = "0.0.3"
+	AppVersion = "0.0.4"
 )
 
 var (
@@ -29,8 +18,7 @@ var (
 	argDrainAll     = flag.Bool("drain-all", false, "Execute all instance draining.")
 	argAgentVersion = flag.String("agent-version", "", "Specify the agent version.")
 	argInstance     = flag.String("instance", "", "Specify the instances.")
-
-	svc = ecs.New(session.New())
+	argLaunchType   = flag.String("type", "", "Specify the launch type (EC2 or Fargate)")
 )
 
 func printTable(data [][]string, header []string) {
@@ -49,183 +37,39 @@ func main() {
 	}
 
 	if *argCluster == "" {
-		res0, err := svc.ListClusters(&ecs.ListClustersInput{})
-		if err != nil {
-			if aerr, ok := err.(awserr.Error); ok {
-				fmt.Println(aerr.Error())
-			} else {
-				fmt.Println(err.Error())
-			}
-			return
-		}
-		var clsNames []*string
-		for _, r := range res0.ClusterArns {
-			splitedArn := strings.Split(*r, "/")
-			clusterName := splitedArn[len(splitedArn)-1]
-			clsNames = append(clsNames, aws.String(clusterName))
-		}
-
-		inp1 := &ecs.DescribeClustersInput{
-			Clusters: clsNames,
-		}
-		res1, err := svc.DescribeClusters(inp1)
-		if err != nil {
-			if aerr, ok := err.(awserr.Error); ok {
-				fmt.Println(aerr.Error())
-			} else {
-				fmt.Println(err.Error())
-			}
-			return
-		}
-		var clsDatas [][]string
-		for _, r := range res1.Clusters {
-			launchType := "EC2"
-			if *r.RegisteredContainerInstancesCount == 0 && *r.RunningTasksCount > 0 {
-				launchType = "FARGATE"
-			} else if *r.RegisteredContainerInstancesCount == 0 && *r.RunningTasksCount == 0 {
-				launchType = "---"
-			}
-			clsData := []string{
-				*r.ClusterName,
-				launchType,
-				strconv.FormatInt(*r.RegisteredContainerInstancesCount, 10),
-				strconv.FormatInt(*r.RunningTasksCount, 10),
-				strconv.FormatInt(*r.PendingTasksCount, 10),
-				*r.Status,
-			}
-			clsDatas = append(clsDatas, clsData)
-		}
-		clsHeader := []string{"Cluster Name", "Launch Type", "Container Instances", "Running Tasks", "Pending Tasks", "Status"}
-		printTable(clsDatas, clsHeader)
-		os.Exit(0)
-	}
-
-	////////////////////////////////////////////////////////////////////////
-	input := &ecs.ListContainerInstancesInput{
-		Cluster: aws.String(*argCluster),
-	}
-
-	result, err := svc.ListContainerInstances(input)
-	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
-			fmt.Println(aerr.Error())
+		clsNames := GetClusters()
+		clsDatas, clsHeader := GetClustersDetails(clsNames, *argLaunchType)
+		if clsDatas != nil {
+			printTable(clsDatas, clsHeader)
+			os.Exit(0)
 		} else {
-			fmt.Println(err.Error())
+			os.Exit(1)
 		}
-		return
-	}
-
-	var ids []*string
-	for _, ca := range result.ContainerInstanceArns {
-		cas := strings.Split(*ca, "/")
-		id := cas[len(cas)-1]
-		ids = append(ids, aws.String(id))
-	}
-
-	////////////////////////////////////////////////////////////////////////
-	input2 := &ecs.DescribeContainerInstancesInput{
-		Cluster:            aws.String(*argCluster),
-		ContainerInstances: ids,
-	}
-
-	result2, err := svc.DescribeContainerInstances(input2)
-	if err != nil {
-		if aerr, ok := err.(awserr.Error); ok {
-			fmt.Println(aerr.Error())
-		} else {
-			fmt.Println(err.Error())
-		}
-		return
-	}
-
-	// fmt.Println(result2)
-	var insDatas [][]string
-	for _, c := range result2.ContainerInstances {
-		// fmt.Println(c)
-		cia := strings.Split(*c.ContainerInstanceArn, "/")
-		id2 := cia[len(cia)-1]
-		docker_version := strings.Replace(*c.VersionInfo.DockerVersion, "DockerVersion: ", "", 1)
-		RunningTasksCount := strconv.FormatInt(*c.RunningTasksCount, 10)
-		insData := []string{
-			id2,
-			*c.Ec2InstanceId,
-			*c.VersionInfo.AgentVersion,
-			docker_version,
-			RunningTasksCount,
-			*c.Status,
-		}
-		insDatas = append(insDatas, insData)
-	}
-
-	insHeader := []string{"Container Instnace", "Instance ID", "Agent Version", "Docker Version", "Running Tasks", "Status"}
-	printTable(insDatas, insHeader)
-	// os.Exit(0)
-
-	if *argInstance == "" && !*argDrainAll {
-		os.Exit(0)
-	}
-
-	// fmt.Println(insDatas)
-	var drainTargets [][]string
-	if *argDrainAll {
-		for _, insd := range insDatas {
-			if !strings.EqualFold(insd[2], *argAgentVersion) {
-				drainTargets = append(drainTargets, insd)
-			}
-		}
-	} else if *argInstance != "" {
-		drainTargets = append(drainTargets, []string{*argInstance})
-	}
-
-	if len(drainTargets) == 0 {
-		fmt.Println("The drain target instance does not exist.")
-		os.Exit(1)
-	}
-
-	// 全体のインスタンス数が drain 対象のインスタンス数よりも多いことが条件
-	if len(insDatas) >= (len(drainTargets) * 2) {
-		fmt.Printf("Cluster Instances: %d\nDrain Target Instances: %d\n", len(insDatas), len(drainTargets))
 	} else {
-		fmt.Printf("There are not enough instances in the cluster.\n")
-		os.Exit(1)
-	}
-
-	fmt.Printf("Do you want to continue processing? (y/n): ")
-	var stdin string
-	fmt.Scan(&stdin)
-	switch stdin {
-	case "y", "Y":
-		var conInsts []*string
-		for _, conIns := range drainTargets {
-			conInsts = append(conInsts, aws.String(conIns[0]))
-		}
-
-		////////////////////////////////////////////////////////////////////////
-		input3 := &ecs.UpdateContainerInstancesStateInput{
-			Cluster:            aws.String(*argCluster),
-			Status:             aws.String("DRAINING"),
-			ContainerInstances: conInsts,
-		}
-
-		result3, err := svc.UpdateContainerInstancesState(input3)
-		if err != nil {
-			if aerr, ok := err.(awserr.Error); ok {
-				fmt.Println(aerr.Error())
+		if *argDrain && *argInstance != "" {
+			result := ExecuteDrain(*argCluster, *argInstance)
+			if result {
+				os.Exit(0)
 			} else {
-				fmt.Println(err.Error())
+				os.Exit(1)
 			}
-			return
 		}
-
-		for _, r3 := range result3.ContainerInstances {
-			fmt.Println(*r3.Status)
+		//
+		if *argDrainAll && *argAgentVersion != "" {
+			result := ExecuteDrainAll(*argCluster, *argAgentVersion)
+			if result {
+				os.Exit(0)
+			} else {
+				os.Exit(1)
+			}
 		}
-	case "n", "N":
-		fmt.Println("Interrupted.")
-		os.Exit(0)
-	default:
-		fmt.Println("Interrupted.")
-		os.Exit(0)
+		//
+		insDatas, insHeader := GetClusterInstancesWithDatails(*argCluster)
+		if insDatas != nil {
+			printTable(insDatas, insHeader)
+			os.Exit(0)
+		} else {
+			os.Exit(1)
+		}
 	}
-
 }
